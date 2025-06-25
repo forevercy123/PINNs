@@ -1,0 +1,10 @@
+Metadata-Version: 2.4
+Name: Utilities
+Version: 1.0.0
+Summary: Isaac Gym environments for Legged Robots
+Author: cy
+Author-email: 
+License: BSD-3-Clause
+Dynamic: author
+Dynamic: license
+Dynamic: summary
