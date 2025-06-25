@@ -166,7 +166,7 @@ class PhysicsInformedNN(nn.Module):
         loss.backward()
         return loss
 
-    def train_LBFGS(self):
+    def train_LBFGS(self, nIter):
         print("Training with L-BFGS...")
         self.optimizer_LBFGS = optim.LBFGS(
             self.parameters(),
@@ -175,7 +175,7 @@ class PhysicsInformedNN(nn.Module):
             tolerance_change=1e-8,
             line_search_fn="strong_wolfe",
         )
-        for it in range(50000 // 50):  # Total iterations ~50k
+        for it in range(nIter // 50):  # Total iterations ~50k
             self.optimizer_LBFGS.step(self.closure)
             loss = self.loss_fn().item()
             lambda_1 = self.lambda_1.item()
@@ -188,6 +188,9 @@ class PhysicsInformedNN(nn.Module):
         x = torch.tensor(x_star, dtype=torch.float32, requires_grad=True).to(device)
         y = torch.tensor(y_star, dtype=torch.float32, requires_grad=True).to(device)
         t = torch.tensor(t_star, dtype=torch.float32, requires_grad=True).to(device)
+        # 确保 t 是二维张量
+        if t.dim() == 1:
+            t = t.unsqueeze(1)  # 从 (N,) 重塑为 (N, 1)
         u, v, p, _, _ = self.net_NS(x, y, t)
         return (
             u.detach().cpu().numpy(),
@@ -207,9 +210,18 @@ if __name__ == "__main__":
     X_star = data["X_star"]  # N x 2
 
     N, T = X_star.shape[0], t_star.shape[0]
+    print(f"t_star shape: {t_star.shape}, T: {T}")  # 调试：打印 t_star 形状
+
+    # 确保 t_star 是 (T, 1) 形状
+    t_star = t_star.reshape(-1, 1)
+    print(f"t_star reshaped: {t_star.shape}")
+
+    # 修正 TT 的生成，确保形状为 (N, T)
+    TT = np.tile(t_star.T, (N, 1))  # 先转置 t_star 为 (1, T)，然后复制 N 次
+    print(f"TT shape: {TT.shape}")  # 调试：打印 TT 形状
+
     XX = np.tile(X_star[:, 0:1], (1, T))
     YY = np.tile(X_star[:, 1:2], (1, T))
-    TT = np.tile(t_star, (N, 1))
 
     UU = U_star[:, 0, :]
     VV = U_star[:, 1, :]
@@ -231,17 +243,34 @@ if __name__ == "__main__":
     model = PhysicsInformedNN(x_train, y_train, t_train, u_train, v_train, layers).to(
         device
     )
-    model.train_Adam(10000)
-    model.train_LBFGS()
+    model.train_Adam(1000)
+    model.train_LBFGS(5000)
 
-    snap = np.array([100])
-    x_star = X_star[:, 0:1]
-    y_star = X_star[:, 1:2]
-    t_star = TT[:, snap]
+    # 动态选择 snap
+    print(f"Number of time steps (T): {T}")  # 打印时间步数以供调试
+    if T > 1:
+        snap = np.array([min(100, T - 1)])  # 选择最后一个时间步或100（取较小值）
+    else:
+        snap = np.array([0])  # 如果只有1个时间步，选择索引0
+    print(f"snap value: {snap}, snap shape: {snap.shape}")  # 调试：打印 snap 值和形状
 
-    u_star = U_star[:, 0, snap][:, None]
-    v_star = U_star[:, 1, snap][:, None]
-    p_star = P_star[:, snap][:, None]
+    # 确保 snap 索引合法
+    if snap[0] >= TT.shape[1]:
+        raise ValueError(
+            f"snap index {snap[0]} out of bounds for TT with shape {TT.shape}"
+        )
+
+    x_star = X_star[:, 0:1]  # (N, 1)
+    y_star = X_star[:, 1:2]  # (N, 1)
+    t_star = TT[:, snap[0]][:, None]  # 确保 t_star 是 (N, 1)
+
+    print(
+        f"x_star shape: {x_star.shape}, y_star shape: {y_star.shape}, t_star shape: {t_star.shape}"
+    )  # 调试：打印输入形状
+
+    u_star = U_star[:, 0, snap[0]][:, None]
+    v_star = U_star[:, 1, snap[0]][:, None]
+    p_star = P_star[:, snap[0]][:, None]
 
     u_pred, v_pred, p_pred = model.predict(x_star, y_star, t_star)
 
@@ -272,9 +301,46 @@ if __name__ == "__main__":
     VV_star = griddata(X_star, v_pred.flatten(), (X, Y), method="cubic")
     PP_star = griddata(X_star, p_pred.flatten(), (X, Y), method="cubic")
     P_exact = griddata(X_star, p_star.flatten(), (X, Y), method="cubic")
+    U_exact = griddata(X_star, u_star.flatten(), (X, Y), method="cubic")
+    V_exact = griddata(X_star, v_star.flatten(), (X, Y), method="cubic")
 
-    # 可视化部分（可选）
+    # 可视化部分
     fig, ax = plt.subplots(2, 3, figsize=(18, 10))
-    # 添加绘图逻辑...
+    # Predicted u
+    c = ax[0, 0].contourf(X, Y, UU_star, levels=50, cmap="jet")
+    fig.colorbar(c, ax=ax[0, 0])
+    ax[0, 0].set_title("Predicted u")
+    ax[0, 0].set_xlabel("x")
+    ax[0, 0].set_ylabel("y")
+    # Predicted v
+    c = ax[0, 1].contourf(X, Y, VV_star, levels=50, cmap="jet")
+    fig.colorbar(c, ax=ax[0, 1])
+    ax[0, 1].set_title("Predicted v")
+    ax[0, 1].set_xlabel("x")
+    ax[0, 1].set_ylabel("y")
+    # Predicted p
+    c = ax[0, 2].contourf(X, Y, PP_star, levels=50, cmap="jet")
+    fig.colorbar(c, ax=ax[0, 2])
+    ax[0, 2].set_title("Predicted p")
+    ax[0, 2].set_xlabel("x")
+    ax[0, 2].set_ylabel("y")
+    # Exact u
+    c = ax[1, 0].contourf(X, Y, U_exact, levels=50, cmap="jet")
+    fig.colorbar(c, ax=ax[1, 0])
+    ax[1, 0].set_title("Exact u")
+    ax[1, 0].set_xlabel("x")
+    ax[1, 0].set_ylabel("y")
+    # Exact v
+    c = ax[1, 1].contourf(X, Y, V_exact, levels=50, cmap="jet")
+    fig.colorbar(c, ax=ax[1, 1])
+    ax[1, 1].set_title("Exact v")
+    ax[1, 1].set_xlabel("x")
+    ax[1, 1].set_ylabel("y")
+    # Exact p
+    c = ax[1, 2].contourf(X, Y, P_exact, levels=50, cmap="jet")
+    fig.colorbar(c, ax=ax[1, 2])
+    ax[1, 2].set_title("Exact p")
+    ax[1, 2].set_xlabel("x")
+    ax[1, 2].set_ylabel("y")
     plt.tight_layout()
     plt.show()
